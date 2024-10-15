@@ -1,11 +1,13 @@
 This is my plan for this project:
 10/15/24
 
-Background - I am interested in machine learning and AI and wondered if it is possible to create and train an AI to play a videogame, a game I very much enjoy that I have been playing for more than a decade that I think would be plausible for this project is a game called Geometry Dash.
+Background - I am interested in machine learning and AI and wondered if it is possible to create and train an AI to play a videogame
+A game I very much enjoy that I have been playing for more than a decade that I think would be plausible for this project is a game called Geometry Dash.
 This game is essentially a side scroller where you play as a block that has to jump over obstacles, but it gets much more difficult as the levels progress. It incorporates more mechanics such as ships, gravity switches, speed, invisibility, and more.
 I have just done some research into what I need to learn and use to do this project.
 I have 3 options, hard code the solutions in, use machine learning models, or create a reinforcement learning AI algorithm. The latter is the one I chose.
-This can be done various different ways, such as using an emulator, an API, or Screen analysis. I think while and API would make it easier and quicker, it would require maybe some hardcoding for each level I want it to play, whereas the Screen Analysis, while harder to implement, will be more dynamic.
+This can be done various different ways, such as using an emulator, an API, or Screen analysis. 
+I think while and API would make it easier and quicker, it would require maybe some hardcoding for each level I want it to play, whereas the Screen Analysis, while harder to implement, will be more dynamic.
 My goal is to have the AI be able to complete at least the first 3 levels, if not more advanced ones.
 
 This is the steps I have put together
