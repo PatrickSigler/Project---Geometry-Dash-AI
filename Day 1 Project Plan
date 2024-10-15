@@ -1,0 +1,43 @@
+This is my plan for this project:
+10/15/24
+
+Background - I am interested in machine learning and AI and wondered if it is possible to create and train an AI to play a videogame, a game I very much enjoy that I have been playing for more than a decade that I think would be plausible for this project is a game called Geometry Dash.
+This game is essentially a side scroller where you play as a block that has to jump over obstacles, but it gets much more difficult as the levels progress. It incorporates more mechanics such as ships, gravity switches, speed, invisibility, and more.
+I have just done some research into what I need to learn and use to do this project.
+I have 3 options, hard code the solutions in, use machine learning models, or create a reinforcement learning AI algorithm. The latter is the one I chose.
+This can be done various different ways, such as using an emulator, an API, or Screen analysis. I think while and API would make it easier and quicker, it would require maybe some hardcoding for each level I want it to play, whereas the Screen Analysis, while harder to implement, will be more dynamic.
+My goal is to have the AI be able to complete at least the first 3 levels, if not more advanced ones.
+
+This is the steps I have put together
+1. First im planning on finishing my courera course on Python in machine learning and data analysis, and im going to start working on an IBM certificate in machine learning and an IBM certificate in AI engineering to gain some skills for this project.
+2. Im going to make sure I have the softwares I need installed which include:
+  - Python
+  - OpenCV: used for image processing (pip install opencv-python) 
+  - NumPy: used for numerical operations (pip install numpy)
+  - PyAutoGUI: used for simulating keyboard/mouse actions (pip install pyautogui)
+  - TensorFlow or Pytorch: used for building the reinforcement learning model (pip install tensorflow) (pip install torch)
+  - StableBaselines3: additionsal libraries for reinforcement learning (pip install stable-baselines3)
+3. Learn and understand Reinforcement Learning Concepts:
+  - Markov Decision Processes (MDP)
+  - Q-Learning
+  - Deep Q-Networks (DQN)
+4. Implement Screen Analysis
+  - Using OpenCV, I need to write a function to capture the screen region where Geometry Dash is displayed.
+  - I need to process the images to detect obstacles, platforms, and the player(block). As well as edge detection and color detection.
+5. Create the RL Model:
+  - To create the RL Model I need to define the state space (the captured images), define the action space (jump, not jump, etc.), and implement the reward system (+1 for successful jump, -1 for hitting obstacles/dying)
+6. Train my model
+  - Simulate gameplay by capturing states, taking actions based on the models predictions, and feeding the results back into the model
+  - have it gain a lot of experience and data playing the game
+7. Integrate Game Control
+  - I will use PyAutoGUI to control the game based on the actions my model wants to do, such as keyboard/mouse commands (click, spacebar)
+8. Test and Iterate
+  - Run and observe performance
+  - Fine-tune
+  - modify hyperparameters
+  - improve screen analysis techniques
+9. Feedback Loop
+  - I will set up a feedback loop in my code to continuously improve the model based on performance.
+10. Enhancing the Model
+  - By now I should be able to pass maybe the first few levels, but I need to try to train the model to take on more complex levels with more mechanics
+  - To do this I can try to use techniques such as Transfer Learning, or different algorithms like Proximal Policy Optimization (PPO)
