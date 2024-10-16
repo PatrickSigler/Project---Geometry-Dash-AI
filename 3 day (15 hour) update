@@ -1,0 +1,154 @@
+Heres an update on the project:
+So far, I have spent 2 whole days on this project, probably almost 15 hours total
+This is my progress
+I have learned about different libraries and what they do, including gym, numpy, random, cv2, PIL, imageGrab, pyautogui, and pygetwindow
+I have made a gym environment for the AI to interact with the game
+methods in this class include a constructor, step function with reward logic, a check death function, a reset function, a render function, a capture screen function, a preprocess screen funciton, a focus window funciton
+I created a test environment loop
+I spent most of the time debugging
+currently I am having difficulty implementing a good death detector, without an emulator or an API it makes it hard, first I tried to find frame freezes, then tried sound detection, then image detection
+I think fine tuning the frame freezes to find out when the character dies is the most efficient I will use to train my model, but it requires the framerate captured to be high which induces lag in my program
+But so far the program can interact with the game and mostly tell when the character dies after inputting random inputs, which is progress!
+Next I am going to look into starting to train the model hopefully.
+
+Here is my code:
+import gym #to create and interact with RL environments
+from gym import spaces #defines the action space and observation space
+import numpy as np #to handle matrix operations and arrays
+import random #to introduce randomness into AI decision-making
+import cv2 #to capture and process screenshots
+from PIL import ImageGrab #to capture screenshots
+import pyautogui #to simulate key-presses and mouse clicks
+import time #to control speed of action loops
+from stable_baselines3 import PPO #to create and trail RL models
+from stable_baselines3.common.env_util import make_vec_env #to create vectorized environments
+import os #to work with file paths and check if certain directories or files exist
+import pygame #to interact with Geometry Dash Game
+import pygetwindow as gw #library to handle window focus
+import pyaudio #to capture audio
+import wave
+from threading import Thread
+from queue import Queue
+
+#Define gym environment for the AI to interact with Geometry Dash (observation and action spaces)
+class GeometryDashEnv(gym.Env):
+
+    def __init__(self): #constructor
+        super(GeometryDashEnv, self).__init__() #calls the initializer of the parent class
+
+        self.action_space = spaces.Discrete(2) #define the action space: 0 = no action, 1 = jump
+
+        #observation space: pass an image (or an array) representing the game screen
+        self.observation_space = spaces.Box(low=0, high=255, shape=(360 , 640, 3), dtype=np.uint8) #example image size
+        #dtype=py.uint8: each value is 8-bit unsigned int which is common for image data
+
+        self.state = None #Game state variables (score, level, etc.)
+
+        self.step_time = 0.02  #Time for each step (to regulate how often the AI takes actions)
+
+        self.frame_skip = 2  # capture every 2nd frame
+        self.frame_counter = 0
+
+    def step(self, action): #The AI's interaction with the game
+        self.focus_geometry_dash_window() #ensure geometry dash is the active window
+
+        #if action == 1: #jump in the game
+            #pyautogui.keyDown('space') #press space
+            #time.sleep(0.02) #(t)ms keypress
+            #pyautogui.keyUp('space') #release space
+
+        if self.frame_counter % self.frame_skip == 0: #if it's time to capture frame
+            current_screen_cv2 = self.capture_screen()  # capture screen using OpenCV
+            processed_screen = self.preprocess_screen(current_screen_cv2)  # preprocess the screen (resize, grayscale)
+
+            if hasattr(self, 'previous_screen'):
+                done = self.check_death(current_screen_cv2, self.previous_screen)  # check if the game is over (player died)
+            else:
+                done = False
+
+            # reward logic:
+            if done:
+                reward = -100  # penalize for dying
+            else:
+                reward = 1  # reward for staying alive
+
+            self.previous_screen = current_screen_cv2  # update previous screen for next step
+            time.sleep(self.step_time)  # wait a short time between steps
+
+            return processed_screen, reward, done, {}  # return observations
+
+        self.frame_counter += 1
+        return self.previous_screen, 0, False, {} #return last processed frame without change
+
+    def check_death(self, screen_cv2, previous_screen_cv2): #check if player has died
+        #check for death by comparing two consecutive frames for changes
+
+        #progress bar to determine death (y_start:y_end, x_start:x_end)
+        progress_bar_region_current = screen_cv2[100:1080, 0:1920] #screen space where progress bar is located
+        progress_bar_region_previous = previous_screen_cv2[100:1080, 0:1920]  # screen space where progress bar is located
+        difference = cv2.absdiff(progress_bar_region_current, progress_bar_region_previous)  # compare to detect lack of movement, calculates absolute difference between 2 frames
+        mean_diff = np.mean(difference)  # finds the average pixel difference between the two frames
+
+        #print("mean diff:", mean_diff) #debugging
+
+        if mean_diff < 0.7: #if diff between frames is small, game has likely frozen (death)
+            return True #player has died
+        return False #player is living
+
+    def reset(self): #reset environment for new game
+        pyautogui.press('r') #reset the game
+        time.sleep(1.8) #give game time to reset
+
+        screen_cv2 = self.capture_screen() #capture screen using OpenCV
+        processed_screen = self.preprocess_screen(screen_cv2)  # preprocess the screen (resize, grayscale)
+
+        return processed_screen #return initial observation
+
+
+    def render(self, mode='human'): #render the game state, 'human' so we can understand the render
+        if (mode == 'human'):
+            screen_cv2 = self.capture_screen()  # capture screen using OpenCV
+            cv2.imshow("Geometry Dash AI", screen_cv2)
+            cv2.waitKey(1)  # wait a moment to display the frame
+
+    def capture_screen(self): #to capture screen with PIL and return it as an OpenCV-compatible image for manipulation
+        screen = ImageGrab.grab(bbox=(0, 0, 1920, 1080)) #captures full screen with PIL (in 1080p)
+        screen_py = np.array(screen) #convert captured screen to NumPy array
+        screen_cv2 = cv2.cvtColor(screen_py, cv2.COLOR_RGB2BGR) #convert the color format from RGB (PIL) to BGR (OpenCV)
+        return screen_cv2
+
+    def preprocess_screen(self, screen_cv2): #to resize and convert the screen to grayscale
+        resized_screen = cv2.resize(screen_cv2, (640, 360)) #Resize the image to a smaller resolution to reduce computational load
+        gray_screen = cv2.cvtColor(resized_screen, cv2.COLOR_BGR2GRAY) #convert the screen to grayscale
+        return gray_screen
+
+    def focus_geometry_dash_window(self):
+        windows = gw.getWindowsWithTitle('Geometry Dash') #Find geometry dash window
+        if windows:
+            game_window = windows[0] #get first found window with this title
+            game_window.activate() #bring it to foreground
+
+def test_environment():
+    env = GeometryDashEnv() #instance of GeometryDashEnv Class
+    state = env.reset() #reset the environment
+    done = False
+    step_count = 0
+    max_steps = 1000 #to avoid infinite loop
+    #env.render() #vizualise the game screen as the AI interacts with it
+    pyautogui.press('space')  #unpause the game
+
+    while not done and step_count < max_steps:
+        action = env.action_space.sample() #take random action (0 or 1)
+        state, reward, done, info = env.step(action) #step through env with chosen action
+        #print(f"Step: {step_count}, Reward: {reward}, Done: {done}") #print stats for debugging
+        step_count += 1 #count the step
+        if done: #if player dies (done=True), then reset the environment
+            print("Player has died. Resetting the environment...")
+            state = env.reset()
+            done = False
+            #step_count = 0
+        time.sleep(0) #slow loop for testing purposes
+
+    pyautogui.press('esc')  #pause after tests end
+
+test_environment()
