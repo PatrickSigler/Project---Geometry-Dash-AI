@@ -1,1 +1,386 @@
+Today I did a lot of things
+I implemented threading to take in a manual input if i have a false positive or negative death detection
+I further fine tuned my step functions and the rewards
+I got the render function working but it messed up my death detection so I turned it off
+I built my first model!
+This includes methods for saving and loading the model. Saving and outputting stats to the console. 
+Some of the main issues I ran into today were debugging, using the libraries correctly, another thing was the model was running infinitely without a stopping point. 
+Currently I am trying to fine tune the model and research ways that it can work better.
+
+This is my current code:
+
+#import gym #to create and interact with RL environments
+#from gym import spaces #defines the action space and observation space
+#from gym.envs.registration import register
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.envs.registration import register
+from gymnasium.wrappers.monitoring import video_recorder
+import numpy as np #to handle matrix operations and arrays
+import random #to introduce randomness into AI decision-making
+import cv2 #to capture and process screenshots
+from PIL import ImageGrab #to capture screenshots
+import pyautogui #to simulate key-presses and mouse clicks
+import time #to control speed of action loops
+from keyboard import on_press_key
+from stable_baselines3 import PPO #to create and trail RL models
+from stable_baselines3.common.env_util import make_vec_env #to create vectorized environments
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.logger import Figure
+import os #to work with file paths and check if certain directories or files exist
+import pygame #to interact with Geometry Dash Game
+import pygetwindow as gw #library to handle window focus
+import pyaudio #to capture audio
+import wave #for sound manipulation
+from threading import Thread #to capture frames in another thread to prevent lag
+import threading
+from queue import Queue
+import keyboard #to detect keyboard inputs
+import matplotlib.pyplot as plt
+
+class InputDetector(object): #for detecting key inputs M and L for false positive and negative death manual inputs
+    def __init__(self):
+        self.manual_death_flag = False
+        self.false_positive_flag = False
+        self.flag_lock = threading.Lock()
+
+    def on_key_press(self, event): #to detect key presses
+        with self.flag_lock:
+            if event.name == 'm':  # the M key for missed death (false negative)
+                self.manual_death_flag = True
+                #print("Manual death detected (missed death).")
+
+            if event.name == "l":  # the L key for false positive death (still alive)
+                self.false_positive_flag = True
+                #print("False Positive death detected (still alive).")
+
+    def start_key_listener(self): #starts thread that listens for keypress events
+        keyboard.on_press(self.on_key_press)
+
+
+#Define gym environment for the AI to interact with Geometry Dash (observation and action spaces)
+class GeometryDashEnv(gym.Env):
+    def __init__(self): #constructor
+        super(GeometryDashEnv, self).__init__() #calls the initializer of the parent class
+
+        self.action_space = spaces.Discrete(2) #define the action space: 0 = no action, 1 = jump
+
+        #observation space: pass an image (or an array) representing the game screen
+        self.observation_space = spaces.Box(low=0, high=255, shape=(360 , 640, 3), dtype=np.uint8) #example image size
+        #dtype=py.uint8: each value is 8-bit unsigned int which is common for image data
+
+        self.state = None #Game state variables (score, level, etc.)
+
+        self.step_time = 0.01  #Time for each step (to regulate how often the AI takes actions)
+        self.max_steps = 200000
+        self.step_counter = 0
+
+        self.frame_skip = 1  # capture every n frame
+        self.frame_counter = 0
+
+        self.MeanDiffAvg = 0.75
+        self.ResetDelay = 0.5
+
+        self.input_detector = InputDetector() #initialize input detector
+        #start key listener thread for detecting death inputs
+        key_listener_thread = threading.Thread(target=self.input_detector.start_key_listener, daemon=True)
+        key_listener_thread.start()
+
+        self.np_random = np.random.RandomState() #create a RandomState object
+
+    def step(self, action): #The AI's interaction with the game
+        self.focus_geometry_dash_window() #ensure geometry dash is the active window
+
+        if action == 1: #jump in the game
+            pyautogui.keyDown('space') #press space
+            time.sleep(0.02) #(t)ms keypress
+            pyautogui.keyUp('space') #release space
+
+        if self.frame_counter % self.frame_skip == 0: #if it's time to capture frame
+            current_screen_cv2 = self.capture_screen()  # capture screen using OpenCV
+            processed_screen = self.preprocess_screen(current_screen_cv2)  # preprocess the screen (resize, grayscale)
+
+            if hasattr(self, 'previous_screen'):
+                done = self.check_death(current_screen_cv2, self.previous_screen)  # check if the game is over (player died)
+            else:
+                done = False
+
+            # reward logic:
+            if done:
+                reward = -100  # penalize for dying
+            else:
+                reward = 1 + (self.current_distance / 100)  # Reward for staying alive and progressing
+            if self.current_distance > self.max_distance:
+                reward += 10  # Bonus for reaching a new max distance
+                self.max_distance = self.current_distance
+
+            # check for manual inputs for death detection
+            if self.input_detector.manual_death_flag:  # press m for manual death (missed death, restarted)
+                done = True
+                reward -= 75
+                print("Manual death recorded.")
+                self.input_detector.manual_death_flag = False #reset flag
+            if self.input_detector.false_positive_flag:  # press l for false positive death (incorrect death detection, currently living)
+                done = False
+                reward += 75
+                print("False positive recorded")
+                self.input_detector.false_positive_flag = False #reset flag
+
+            self.previous_screen = current_screen_cv2  # update previous screen for next step
+            time.sleep(self.step_time)  # wait a short time between steps
+
+            #determine is game has been terminated or truncated
+            terminated = done #assuming the game ends when done is true
+
+            if self.step_counter >= self.max_steps: #check if max steps is reached
+                truncated = True
+                done = True
+                print("Maximum steps reached. Episode Truncated.")
+            else:
+                truncated = False
+
+            #print(f"Action taken: {action}, Reward: {reward}, Done: {done}")  # Debugging information
+            return processed_screen, reward, terminated, truncated, {}  # return observations
+
+        self.frame_counter += 1
+
+        return self.preprocess_screen(self.previous_screen), 0, False, False, {} #return last processed frame without changer
+
+    def check_death(self, screen_cv2, previous_screen_cv2): #check if player has died
+        #check for death by comparing two consecutive frames for changes
+
+        #progress bar to determine death (y_start:y_end, x_start:x_end)
+        progress_bar_region_current = screen_cv2[100:1080, 0:1920] #screen space where progress bar is located
+        progress_bar_region_previous = previous_screen_cv2[100:1080, 0:1920]  # screen space where progress bar is located
+        difference = cv2.absdiff(progress_bar_region_current, progress_bar_region_previous)  # compare to detect lack of movement, calculates absolute difference between 2 frames
+        mean_diff = np.mean(difference)  # finds the average pixel difference between the two frames
+
+        #print("mean diff:", mean_diff) #debugging
+
+        if mean_diff < self.MeanDiffAvg: #if diff between frames is small, game has likely frozen (death)
+            print("automatic death recorded")
+            return True #player has died
+        return False #player is living
+
+    def reset(self, seed=None, options=None): #reset environment for new game
+        pyautogui.press('r') #reset the game
+        time.sleep(self.ResetDelay) #give game time to reset
+
+        screen_cv2 = self.capture_screen() #capture screen using OpenCV
+        processed_screen = self.preprocess_screen(screen_cv2)  # preprocess the screen (resize, grayscale)
+
+        #reset flags and states
+        #self.input_detector.manual_death_flag = False
+        #self.input_detector.false_positive_flag = False
+        #self.frame_counter = 0  # reset frame counter
+        #self.previous_screen = None  # reset previous screen for death checking
+
+        if seed is not None: #seed logic
+            self.np_random.seed(seed) #set the seed for reproducibility
+
+        self.step_counter = 0
+
+        return processed_screen, {} #return initial observation
+
+    def render(self, mode='human'): #render the game state, 'human' so we can understand the render
+        if (mode == 'human'):
+            screen_cv2 = self.capture_screen()  # capture screen using OpenCV
+            cv2.imshow("Geometry Dash AI", screen_cv2)
+            cv2.waitKey(1)  # wait a moment to display the frame
+
+    def capture_screen(self): #to capture screen with PIL and return it as an OpenCV-compatible image for manipulation
+        screen = ImageGrab.grab(bbox=(0, 0, 1920, 1080)) #captures full screen with PIL (in 1080p)
+        screen_py = np.array(screen) #convert captured screen to NumPy array
+        screen_cv2 = cv2.cvtColor(screen_py, cv2.COLOR_RGB2BGR) #convert the color format from RGB (PIL) to BGR (OpenCV)
+        return screen_cv2
+
+    def preprocess_screen(self, screen_cv2): #to resize and convert the screen to grayscale
+        resized_screen = cv2.resize(screen_cv2, (640, 360)) #Resize the image to a smaller resolution to reduce computational load
+        #gray_screen = cv2.cvtColor(resized_screen, cv2.COLOR_BGR2GRAY) #convert the screen to grayscale
+        screen_rgb = cv2.cvtColor(resized_screen, cv2.COLOR_BGR2RGB) #convert to BGR bc that's what OpenCV uses
+        screen_normalized = (screen_rgb * 255.0).astype(np.uint8)
+        return screen_normalized #return an RGB image with the shape (360, 640, 3)
+
+    def focus_geometry_dash_window(self):
+        windows = gw.getWindowsWithTitle('Geometry Dash') #Find geometry dash window
+        if windows:
+            game_window = windows[0] #get first found window with this title
+            game_window.activate() #bring it to foreground
+        elif not windows:
+            print("Geometry Dash window not found.")
+            return
+
+    def if_level_finished(self, step_count):
+        maxSteps = 100000 #only for test cases for running test env or running trained model
+        if (step_count >= maxSteps):
+            return True
+        return False
+        # later try to figure out level completed screen and implement it into this function, but for now just use a maxStep counter
+
+def test_environment():
+    env = GeometryDashEnv() #instance of GeometryDashEnv Class
+    env.focus_geometry_dash_window()
+    env.reset() #reset the environment
+    done = False
+    truncated = False
+    step_count = 0
+    pyautogui.press('space')  #unpause the game
+    time.sleep(2)
+
+    while not done and env.if_level_finished(step_count) == False: #while not done and game isn't over (step_count < max_steps)
+        action = env.action_space.sample() #take random action (0 or 1)
+        #action, _ = model.predict(obs) #use model prediction
+        state, reward, done, truncated, info = env.step(action) #step through env with chosen action
+        #print(f"Step: {step_count}, Reward: {reward}, Done: {done}") #print stats for debugging
+        step_count += 1 #count the step
+        #env.render()
+        if done: #if player dies (done=True), then reset the environment
+            print("Player has died. Resetting the environment...")
+            env.reset()
+            done = False
+            step_count = 0
+
+    cv2.destroyAllWindows()  # close render
+    pyautogui.press('esc')  # pause after tests end
+    time.sleep(1)
+    pyautogui.press('esc')  # exit to menu/level select
+
+register(id='GeometryDashEnv-v0', entry_point='__main__:GeometryDashEnv',)
+
+def create_env():
+    env = gym.make('GeometryDashEnv-v0')
+    return env
+
+class StatsCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super(StatsCallback, self).__init__(verbose)
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.current_episode_reward = 0
+        self.current_episode_length = 0
+
+    def _on_step(self) -> bool:
+        self.current_episode_reward += self.locals['rewards'][0]
+        self.current_episode_length += 1
+        if self.locals['dones'][0]:
+            self.episode_rewards.append(self.current_episode_reward)
+            self.episode_lengths.append(self.current_episode_length)
+            self.current_episode_reward = 0
+            self.current_episode_length = 0
+        return True
+
+    def _on_training_end(self) -> None:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+        ax1.plot(self.episode_rewards)
+        ax1.set_title('Episode Rewards')
+        ax1.set_xlabel('Episode')
+        ax1.set_ylabel('Reward')
+        ax2.plot(self.episode_lengths)
+        ax2.set_title('Episode Lengths')
+        ax2.set_xlabel('Episode')
+        ax2.set_ylabel('Length')
+        plt.tight_layout()
+        plt.savefig('training_stats.png')
+        plt.close(fig)
+        print(f"Average episode reward: {np.mean(self.episode_rewards)}")
+        print(f"Average episode length: {np.mean(self.episode_lengths)}")
+
+def train_model(continue_training=False):
+    #env = create_env() #create environment
+    pyautogui.press('space')  # unpause the game
+    time.sleep(2)  # wait for game to start
+
+    env = make_vec_env(lambda: create_env(), n_envs=1)
+    model_path = "ppo_geometry_dash_model"
+
+    if continue_training and os.path.exists(model_path + ".zip"):
+        try:
+            print("Attempting to load existing model...")
+            model = PPO.load(model_path, env=env)
+            print("Existing model loaded successfully.")
+        except (EOFError, KeyError, zipfile.BadZipFile) as e:
+            print(f"Error loading model: {e}")
+            print("Creating new model instead.")
+            model = PPO('CnnPolicy', env,
+                        verbose=1,
+                        n_steps=128,  # Increased from 50
+                        batch_size=64,  # Adjusted
+                        learning_rate=3e-4,  # Explicitly set learning rate
+                        gamma=0.99,  # Discount factor
+                        ent_coef=0.01,  # Entropy coefficient
+                        clip_range=0.2,  # PPO clip range
+                        n_epochs=4,  # Number of epochs when optimizing the surrogate
+                        gae_lambda=0.95  # Factor for trade-off of bias vs variance for Generalized Advantage Estimator
+                        )
+    else:
+        print("Creating new model...")
+        model = PPO('CnnPolicy', env,
+                    verbose=1,
+                    n_steps=128,  # Increased from 50
+                    batch_size=64,  # Adjusted
+                    learning_rate=3e-4,  # Explicitly set learning rate
+                    gamma=0.99,  # Discount factor
+                    ent_coef=0.01,  # Entropy coefficient
+                    clip_range=0.2,  # PPO clip range
+                    n_epochs=4,  # Number of epochs when optimizing the surrogate
+                    gae_lambda=0.95  # Factor for trade-off of bias vs variance for Generalized Advantage Estimator
+                    )
+
+    total_timesteps = 100  # Adjust as needed
+    try:
+        callback = StatsCallback()
+        model.learn(total_timesteps=total_timesteps, callback=callback)
+        model.save(model_path)
+        print(f"Model saved successfully to {model_path}")
+    except Exception as e:
+        print(f"An error occurred during training: {e}")
+    finally:
+        env.close()
+
+def run_trained_model():
+    env = GeometryDashEnv() #create environment
+    env.focus_geometry_dash_window()
+    env = make_vec_env(lambda: env, n_envs=1) #wrap env
+    model = PPO.load("ppo_geometry_dash_model") #load model
+
+    done = False
+    step_count = 0
+    pyautogui.press('space')  # unpause the game
+    time.sleep(2) #wait for game to start
+    obs = env.reset() #reset env
+
+    #test model
+    for episode in range(5): #run for n episodes
+        done = False
+        step_count = 0 #reset step count at start of each episode
+        while not done and env.if_level_finished(step_count) == False:
+            action, _states = model.predict(obs) #model predicts actions
+            obs, reward, done, info = env.step(action) #perform actions in env
+            step_count += 1 #increment each step
+            #env.render()
+            if done:
+                print(f"Episode {episode + 1} finished after {step_count} steps.")
+                obs = env.reset() #reset env if game ends
+                done = False #reset done flag for next ep
+
+    cv2.destroyAllWindows()  # close render
+    pyautogui.press('esc')  # pause after tests end
+    time.sleep(1)
+    pyautogui.press('esc')  # exit to menu/level select
+
+# Uncomment this line to train the model (run it once)
+#for i in range(2):
+    #print(f"Training iteration {i + 1}")
+    #train_model()
+    #cv2.destroyAllWindows()  # close render
+    #pyautogui.press('esc')  # pause after tests end
+    #time.sleep(1)
+    #pyautogui.press('esc')  # exit to menu/level select
+train_model(True)
+# Uncomment this line to run the trained model
+#run_trained_model()
+
+# Uncomment this line to test the environment
+#test_environment()
+
 
