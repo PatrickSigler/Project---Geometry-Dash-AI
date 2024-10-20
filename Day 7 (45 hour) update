@@ -1,0 +1,808 @@
+I:
+Tried fixing the death detection by averaging the frame analysis, sound analysis, and a neural network that I trained with a bunch of screenshots showing death or no death
+I threaded the neural network and I also am using my gpu to boost it with pytorch
+I made 3 new classes, different methods to train models and check stuff, including the stats with profile_env()
+
+But after all this, the timing complexity is too high and it wont work
+the program is only stepping every 3 seoconds which is way too slow for the frame analysis or NN to check for death, let alone for the program to make decisions
+I have tried implementing more threading, trying to get the timing delay down, but nothing is working
+so now I am at a standstill trying to figure out what to do, I think I might be out of optinos and just have to train the model on a program where the death detection is semi-inacurate
+
+this is my current code:
+#import gym #to create and interact with RL environments
+#from gym import spaces #defines the action space and observation space
+#from gym.envs.registration import register
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.envs.registration import register
+from gymnasium.wrappers.monitoring import video_recorder
+import numpy as np #to handle matrix operations and arrays
+import random #to introduce randomness into AI decision-making
+import cv2 #to capture and process screenshots
+from PIL import ImageGrab #to capture screenshots
+from PIL import Image
+import pyautogui #to simulate key-presses and mouse clicks
+import time #to control speed of action loops
+from keyboard import on_press_key
+from stable_baselines3 import PPO #to create and trail RL models
+from stable_baselines3.common.env_util import make_vec_env #to create vectorized environments
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.logger import Figure
+from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold
+from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+import os #to work with file paths and check if certain directories or files exist
+import pygame #to interact with Geometry Dash Game
+import pygetwindow as gw #library to handle window focus
+import pyaudio #to capture audio
+import wave #for sound manipulation
+import sounddevice as sd
+from scipy.io import wavfile
+from threading import Thread #to capture frames in another thread to prevent lag
+import threading
+from queue import Queue
+import keyboard #to detect keyboard inputs
+import matplotlib.pyplot as plt
+from collections import deque
+import zipfile
+import torch as th
+#from torch import nn
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import transforms
+from torch.utils.data import DataLoader, TensorDataset
+import librosa
+import cProfile
+import pstats
+
+class ThreadedNNDeathDetection: #process NN detection in separate thread
+    def __init__(self, model):
+        self.model = model
+        self.input_queue = Queue(maxsize=1)
+        self.output_queue = Queue(maxsize=1)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while True:
+            input_data = self.input_queue.get()
+            if input_data is None:  # Use None as a signal to stop the thread
+                break
+            with th.no_grad():
+                output = self.model(input_data)
+            self.output_queue.put(output)
+
+    def predict(self, input_data):
+        if self.input_queue.empty():
+            self.input_queue.put(input_data)
+        if not self.output_queue.empty():
+            return self.output_queue.get()
+        return None  # Return None if no prediction is available
+
+    def stop(self):
+        self.input_queue.put(None)
+        self.thread.join()
+
+#improved death detection
+class DeathDetectionNN(nn.Module):
+    def __init__(self):
+        super(DeathDetectionNN, self).__init__()
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((5, 5))
+        self.fc1 = nn.Linear(32 * 5 * 5, 64)
+        self.fc2 = nn.Linear(64, 1)
+
+    def forward(self, x):
+        x = th.relu(self.conv1(x))
+        x = th.relu(self.conv2(x))
+        x = self.adaptive_pool(x)
+        x = x.view(x.size(0), -1)
+        x = th.relu(self.fc1(x))
+        x = th.sigmoid(self.fc2(x))
+        return x
+
+    def to_gpu(self):
+        return self.cuda() if th.cuda.is_available() else self
+
+    def predict(self, input_data):
+        input_tensor = th.from_numpy(input_data).float().unsqueeze(0)
+        if th.cuda.is_available():
+            input_tensor = input_tensor.cuda()
+        with th.no_grad():
+            output = self(input_tensor)
+        return output.cpu().numpy()
+
+class ImprovedDeathDetection:
+    def __init__(self, death_sound_path):
+        self.mean_diff_threshold = 0.97
+        self.no_progress_threshold = 30  #frames
+        self.last_progress = 0
+        self.no_progress_count = 0
+
+        #Load death sound
+        self.death_sound, _ = librosa.load(death_sound_path, sr=44100)
+
+        # Initialize neural network
+        self.nn_model = DeathDetectionNN().to_gpu()
+        self.nn_death_detector = ThreadedNNDeathDetection(self.nn_model)
+        self.nn_model.load_state_dict(th.load("death_detection_model.pth"))
+        self.nn_model.eval()
+
+    def check_death(self, current_screen, previous_screen):
+        confidence = 0
+
+        # Motion detection
+        if previous_screen is not None:
+            progress_bar_region_current = current_screen[100:1080, 0:1920]
+            progress_bar_region_previous = previous_screen[100:1080, 0:1920]
+            difference = cv2.absdiff(progress_bar_region_current, progress_bar_region_previous)
+            mean_diff = np.mean(difference)
+            print("mean diff:", mean_diff)  # debugging
+            if mean_diff < self.mean_diff_threshold:
+                print("death detected by FRAME")  # debugging
+                confidence += 0.4
+        else:
+            print("No previous screen available for motion detection")
+
+        # Audio detection
+        audio_sample = self.capture_audio()
+        if self.detect_death_sound(audio_sample):
+            print("death detected by SOUND") #debugging
+            confidence += 0.3
+
+        # Neural network prediction
+        #with th.no_grad():
+            #current_screen_rgb = cv2.cvtColor(current_screen, cv2.COLOR_BGR2RGB)
+            #current_screen_resized = cv2.resize(current_screen_rgb, (640, 360))
+            #nn_input = th.from_numpy(current_screen_resized).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+            #nn_prediction = self.nn_model(nn_input).item()
+            #print(f"NN prediction: {nn_prediction}")  # Debugging
+
+        nn_input = self.preprocess_for_nn(current_screen)
+        nn_prediction = self.nn_death_detector.predict(nn_input)
+        print(f"NN prediction: {nn_prediction}")  # Debugging
+        if nn_prediction is not None:
+            if nn_prediction > 0.5:  # Adjust this threshold as needed
+                print("death detected by NN")
+                confidence += nn_prediction * 0.3
+
+        return confidence, confidence > 0.7  # Return confidence and boolean death detection
+
+    def capture_audio(self, duration=1, sample_rate=44100):
+        audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1)
+        sd.wait()
+        #print(f"Audio captured. Shape: {audio.shape}, Max: {np.max(audio)}, Min: {np.min(audio)}")  # Debugging
+        return audio.flatten()
+
+    def detect_death_sound(self, audio_sample):
+        correlation = np.correlate(audio_sample, self.death_sound)
+        max_correlation = np.max(correlation)
+        print(f"Max SOUND correlation: {max_correlation}")  # Debugging
+        return max_correlation > 0.8  # Adjust threshold as needed
+
+    def preprocess_for_nn(self, screen):
+        # Implement preprocessing for NN input here
+        # This should match the input format your NN expects
+        screen_rgb = cv2.cvtColor(screen, cv2.COLOR_BGR2RGB)
+        screen_resized = cv2.resize(screen_rgb, (640, 360))
+        return screen_resized.transpose(2, 0, 1) / 255.0
+
+def load_death_detection_dataset(dataset_path):
+    transform = transforms.Compose([
+        transforms.Resize((360, 640)),
+        transforms.ToTensor(),
+    ])
+
+    death_images = []
+    not_death_images = []
+
+    death_path = os.path.join(dataset_path, 'death')
+    not_death_path = os.path.join(dataset_path, 'not_death')
+
+    for img_name in os.listdir(death_path):
+        img_path = os.path.join(death_path, img_name)
+        img = Image.open(img_path).convert('RGB')
+        img_tensor = transform(img)
+        death_images.append((img_tensor, th.tensor([1.0])))
+
+    for img_name in os.listdir(not_death_path):
+        img_path = os.path.join(not_death_path, img_name)
+        img = Image.open(img_path).convert('RGB')
+        img_tensor = transform(img)
+        not_death_images.append((img_tensor, th.tensor([0.0])))
+
+    all_images = death_images + not_death_images
+    return all_images
+
+def train_death_detection_nn(dataset_path):
+    dataset = load_death_detection_dataset(dataset_path)
+    train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+    model = DeathDetectionNN()
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    num_epochs = 50
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        for inputs, labels in train_loader:
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+
+        epoch_loss = running_loss / len(train_loader)
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {epoch_loss:.4f}")
+
+    print("Training finished!")
+    th.save(model.state_dict(), "death_detection_model.pth")
+    print("Model saved as 'death_detection_model.pth'")
+
+def evaluate_death_detection_model(model, dataset_path):
+    model.eval()  # Set the model to evaluation mode
+    dataset = load_death_detection_dataset(dataset_path)
+    test_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+    correct = 0
+    total = 0
+    with th.no_grad():
+        for inputs, labels in test_loader:
+            outputs = model(inputs)
+            predicted = (outputs > 0.5).float()
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    accuracy = 100 * correct / total
+    print(f"Accuracy on the dataset: {accuracy:.2f}%")
+
+class CustomCNN(BaseFeaturesExtractor):
+    def __init__(self, observation_space: spaces.Box, features_dim: int = 256):
+        super().__init__(observation_space, features_dim)
+
+        # We assume that the image input is (stack_size, channels, height, width)
+        n_input_channels = observation_space.shape[0] * observation_space.shape[1]
+
+        self.cnn = nn.Sequential(
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+
+        # Compute shape by doing one forward pass
+        with th.no_grad():
+            sample = observation_space.sample()[None]
+            sample_shape = sample.shape
+            sample_flattened = sample.reshape((sample_shape[0], -1, *sample_shape[3:]))
+            n_flatten = self.cnn(th.as_tensor(sample_flattened).float()).shape[1]
+
+        self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
+
+    def forward(self, observations: th.Tensor) -> th.Tensor:
+        batch_size = observations.shape[0]
+        # Reshape the input: (batch_size, stack_size, channels, height, width) -> (batch_size, stack_size * channels, height, width)
+        reshaped_obs = observations.reshape((batch_size, -1, *observations.shape[3:]))
+        return self.linear(self.cnn(reshaped_obs))
+
+class InputDetector(object): #for detecting key inputs M and L for false positive and negative death manual inputs
+    def __init__(self):
+        self.manual_death_flag = False
+        self.false_positive_flag = False
+        self.stop_training_flag = False
+        self.flag_lock = threading.Lock()
+
+    def on_key_press(self, event): #to detect key presses
+        with self.flag_lock:
+            if event.name == 'm':  # the M key for missed death (false negative)
+                self.manual_death_flag = True
+                #print("Manual death detected (missed death).")
+
+            if event.name == "l":  # the L key for false positive death (still alive)
+                self.false_positive_flag = True
+                #print("False Positive death detected (still alive).")
+
+            if event.name == "q": #stop training
+                self.stop_training_flag = True
+                print("Q key pressed. Stopping training...")
+
+    def start_key_listener(self): #starts thread that listens for keypress events
+        keyboard.on_press(self.on_key_press)
+
+class TrainingInterruptCallback(BaseCallback): #inherits base call back, checks the stop training flag of input detector on each step
+    def __init__(self, input_detector, verbose=0):
+        super(TrainingInterruptCallback, self).__init__(verbose)
+        self.input_detector = input_detector
+    def _on_step(self) -> bool:
+        return not self.input_detector.stop_training_flag
+
+
+#Define gym environment for the AI to interact with Geometry Dash (observation and action spaces)
+class GeometryDashEnv(gym.Env):
+    def __init__(self): #constructor
+        super(GeometryDashEnv, self).__init__() #calls the initializer of the parent class
+
+        self.action_space = spaces.Discrete(2) #define the action space: 0 = no action, 1 = jump
+
+        #initialize stack size
+        self.stack_size = 4  # implementing frame stacking to help program understand movement and velocity
+        self.frame_shape = (3, 360, 640) # (channels, width, height)
+
+        #observation space: pass an image (or an array) representing the game screen
+        self.observation_space = spaces.Box(low=0, high=255, shape=(self.stack_size, *self.frame_shape), dtype=np.uint8) #example image size
+        #dtype=py.uint8: each value is 8-bit unsigned int which is common for image data
+
+        self.state = None #Game state variables (score, level, etc.)
+
+        self.step_time = 0 #0.05  #Time for each step (to regulate how often the AI takes actions)
+        self.max_steps = 200000
+        self.step_counter = 0
+        self.total_step_counter = 0
+
+        self.frame_counter = 0
+        self.frame_skip = 1  # capture every n frame
+        self.frame_queue = Queue(maxsize=1)
+        self.stop_capture = False
+        self.capture_thread = threading.Thread(target=self._capture_frames, daemon=True)
+        self.capture_thread.start()
+
+        self.MeanDiffAvg = 0.97 #for death detection
+        self.ResetDelay = 0.7 #for reset delay between runs
+
+        self.input_detector = InputDetector() #initialize input detector
+        #start key listener thread for detecting death inputs
+        key_listener_thread = threading.Thread(target=self.input_detector.start_key_listener, daemon=True)
+        key_listener_thread.start()
+
+        self.np_random = np.random.RandomState() #create a RandomState object
+
+        self.frame_stack= deque([], maxlen=self.stack_size)
+
+        #for distance tracking
+        self.current_distance = 0
+        self.max_distance = 0
+
+        #improved death detection
+        self.death_detector = ImprovedDeathDetection(r'C:\Users\sigle\PycharmProjects\GeometryDash-AI\Geometry Dash Death Sound.wav')
+        self.previous_screen = None
+
+        #for NN threading
+        self.nn_model = DeathDetectionNN()
+        self.nn_death_detector = ThreadedNNDeathDetection(self.nn_model)
+
+        #for step function to render every frame for death but only update model every 4?
+        #self.death_check_counter = 0
+        #self.death_check_frequency = 1 #check every frame
+        #self.env_update_frequency = 4 #update env every 4 frames
+
+    def _capture_frames(self):
+        while not self.stop_capture:
+            screen = self.capture_screen()
+            if not self.frame_queue.full():
+                self.frame_queue.put(screen)
+            time.sleep(0.01) #to prevent excessive cpu usage
+
+    def step(self, action): #The AI's interaction with the game
+        self.focus_geometry_dash_window() #ensure geometry dash is the active window
+
+        if action == 1: #jump in the game
+            pyautogui.keyDown('space') #press space
+            time.sleep(0.02) #(t)ms keypress
+            pyautogui.keyUp('space') #release space
+
+        #self.frame_counter += 1
+        if self.frame_counter % self.frame_skip == 0: #if it's time to capture frame
+            #current_screen_cv2 = self.capture_screen()  # capture screen using OpenCV
+            current_screen_cv2 = self.frame_queue.get() #capture with threading
+            processed_screen = self.preprocess_screen(current_screen_cv2)  # preprocess the screen (resize, grayscale)
+
+            #old death detection logic (keep here)
+            #if hasattr(self, 'previous_screen'):
+            #    done = self.check_death(current_screen_cv2, self.previous_screen)  # check if the game is over (player died)
+            #else:
+            #    done = False
+
+            #updated death detection logic with class
+            if self.previous_screen is None:
+                # If it's the first frame, assume no death has occurred
+                confidence, done = 0.0, False
+            else:
+                confidence, done = self.death_detector.check_death(current_screen_cv2, self.previous_screen)
+
+            if done:
+                print(f"Death detected with confidence {confidence:.2f}")
+            elif confidence > 0.4:
+                print(f"Possible death detected with confidence {confidence:.2f}")
+
+            self.current_distance += 1 #increment distance for reward
+
+            # reward logic:
+            if done:
+                reward = -100  # penalize for dying
+            else:
+                reward = 1 + (self.current_distance / 100)  # Reward for staying alive and progressing
+            if self.current_distance > self.max_distance:
+                reward += 10  # Bonus for reaching a new max distance
+                self.max_distance = self.current_distance
+
+            # check for manual inputs for death detection
+            if self.input_detector.manual_death_flag:  # press m for manual death (missed death, restarted)
+                done = True
+                reward -= 100
+                print("Manual death recorded.")
+                self.input_detector.manual_death_flag = False #reset flag
+            if self.input_detector.false_positive_flag:  # press l for false positive death (incorrect death detection, currently living)
+                done = False
+                reward += 50
+                print("False positive recorded")
+                self.input_detector.false_positive_flag = False #reset flag
+
+            self.previous_screen = current_screen_cv2  # update previous screen for next step
+            time.sleep(self.step_time)  # wait a short time between steps
+
+            #determine is game has been terminated or truncated
+            terminated = done #assuming the game ends when done is true
+
+            if self.step_counter >= self.max_steps: #check if max steps is reached
+                truncated = True
+                done = True
+                print("Maximum steps reached. Episode Truncated.")
+            else:
+                truncated = False
+
+            #print(f"Action taken: {action}, Reward: {reward}, Done: {done}")  # Debugging information
+
+            # implementing frame stacking
+            self.frame_stack.append(processed_screen)  # update frame stack
+
+            self.step_counter += 1
+            self.total_step_counter += 1
+            print(self.total_step_counter)
+            return np.array(self.frame_stack), reward, terminated, truncated, {}  # return observations r
+
+        self.frame_counter += 1
+        return np.array(self.frame_stack), 0, False, False, {} #return last processed frame without changer
+
+    def check_death(self, screen_cv2, previous_screen_cv2): #check if player has died
+        #check for death by comparing two consecutive frames for changes
+
+        #progress bar to determine death (y_start:y_end, x_start:x_end)
+        progress_bar_region_current = screen_cv2[100:1080, 0:1920] #screen space where progress bar is located
+        progress_bar_region_previous = previous_screen_cv2[100:1080, 0:1920]  # screen space where progress bar is located
+        difference = cv2.absdiff(progress_bar_region_current, progress_bar_region_previous)  # compare to detect lack of movement, calculates absolute difference between 2 frames
+        mean_diff = np.mean(difference)  # finds the average pixel difference between the two frames
+
+        #print("mean diff:", mean_diff) #debugging
+
+        if mean_diff < self.MeanDiffAvg: #if diff between frames is small, game has likely frozen (death)
+            print("automatic death recorded")
+            return True #player has died
+        return False #player is living
+
+    def reset(self, seed=None, options=None): #reset environment for new game
+        #pyautogui.press('r') #reset the game
+        time.sleep(self.ResetDelay) #give game time to reset
+
+        screen_cv2 = self.capture_screen() #capture screen using OpenCV
+        processed_screen = self.preprocess_screen(screen_cv2)  # preprocess the screen (resize, grayscale)
+
+        #reset flags and states
+        #self.input_detector.manual_death_flag = False
+        #self.input_detector.false_positive_flag = False
+        #self.frame_counter = 0  # reset frame counter
+        #self.previous_screen = None  # reset previous screen for death checking
+
+        if seed is not None: #seed logic
+            self.np_random.seed(seed) #set the seed for reproducibility
+
+        self.step_counter = 0
+
+        self.previous_screen = None
+
+        #initialize frame stack with the same initial frame
+        self.frame_stack = deque([processed_screen] * self.stack_size, maxlen=self.stack_size)
+
+        #clear the frame queue for capture
+        while not self.frame_queue.empty():
+            self.frame_queue.get()
+
+        return np.array(self.frame_stack), {} #return initial observation
+
+    def close(self):
+        self.nn_death_detector.stop()
+        self.stop_capture = True
+        self.capture_thread.join()
+        super().close()
+
+    def render(self, mode='human'): #render the game state, 'human' so we can understand the render
+        if (mode == 'human'):
+            screen_cv2 = self.capture_screen()  # capture screen using OpenCV
+            cv2.imshow("Geometry Dash AI", screen_cv2)
+            cv2.waitKey(1)  # wait a moment to display the frame
+
+    def capture_screen(self): #to capture screen with PIL and return it as an OpenCV-compatible image for manipulation
+        screen = ImageGrab.grab(bbox=(0, 0, 1920, 1080)) #captures full screen with PIL (in 1080p)
+        screen_py = np.array(screen) #convert captured screen to NumPy array
+        return cv2.cvtColor(screen_py, cv2.COLOR_RGB2BGR) #convert the color format from RGB (PIL) to BGR (OpenCV)
+
+    def preprocess_screen(self, screen_cv2): #to resize and convert the screen to grayscale
+        resized_screen = cv2.resize(screen_cv2, (640, 360)) #Resize the image to a smaller resolution to reduce computational load
+        #gray_screen = cv2.cvtColor(resized_screen, cv2.COLOR_BGR2GRAY) #convert the screen to grayscale
+        screen_rgb = cv2.cvtColor(resized_screen, cv2.COLOR_BGR2RGB) #convert to BGR bc that's what OpenCV uses
+        #screen_normalized = (screen_rgb * 255.0).astype(np.uint8)
+        screen_normalized = np.clip(screen_rgb, 0, 255).astype(np.uint8)
+        #transpose the image to channel-first format (3, 360, 640)
+        return screen_normalized.transpose(2, 0, 1) #return an RGB image with the shape (360, 640, 3)
+
+    def focus_geometry_dash_window(self):
+        windows = gw.getWindowsWithTitle('Geometry Dash') #Find geometry dash window
+        if windows:
+            game_window = windows[0] #get first found window with this title
+            game_window.activate() #bring it to foreground
+        elif not windows:
+            print("Geometry Dash window not found.")
+            return
+
+    def if_level_finished(self, step_count):
+        #later input level number and have set max steps per level
+        maxSteps = 100000 #only for test cases for running test env or running trained model (placeholder)
+        self.max_steps = maxSteps
+        if (step_count >= maxSteps):
+            return True
+        return False
+        # later try to figure out level completed screen and implement it into this function, but for now just use a maxStep counter
+
+def test_environment():
+    env = GeometryDashEnv() #instance of GeometryDashEnv Class
+    env.focus_geometry_dash_window()
+    env.reset() #reset the environment
+    done = False
+    truncated = False
+    step_count = 0
+    pyautogui.press('space')  #unpause the game
+    time.sleep(2)
+
+    while not done and env.if_level_finished(step_count) == False: #while not done and game isn't over (step_count < max_steps)
+        action = env.action_space.sample() #take random action (0 or 1)
+        #action, _ = model.predict(obs) #use model prediction
+        state, reward, done, truncated, info = env.step(action) #step through env with chosen action
+        #print(f"Step: {step_count}, Reward: {reward}, Done: {done}") #print stats for debugging
+        step_count += 1 #count the step
+        #env.render()
+        if done: #if player dies (done=True), then reset the environment
+            print("Player has died. Resetting the environment...")
+            env.reset()
+            done = False
+            step_count = 0
+        time.sleep(0.01)
+
+    env.close()
+    cv2.destroyAllWindows()  # close render
+    pyautogui.press('esc')  # pause after tests end
+    time.sleep(1)
+    pyautogui.press('esc')  # exit to menu/level select
+
+register(id='GeometryDashEnv-v0', entry_point='__main__:GeometryDashEnv',)
+
+def create_env():
+    env = gym.make('GeometryDashEnv-v0')
+    return env
+
+class StatsCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super(StatsCallback, self).__init__(verbose)
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.current_episode_reward = 0
+        self.current_episode_length = 0
+
+    def _on_step(self) -> bool:
+        self.current_episode_reward += self.locals['rewards'][0]
+        self.current_episode_length += 1
+        if self.locals['dones'][0]:
+            self.episode_rewards.append(self.current_episode_reward)
+            self.episode_lengths.append(self.current_episode_length)
+            self.current_episode_reward = 0
+            self.current_episode_length = 0
+        return True
+
+    def _on_training_end(self) -> None:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+        ax1.plot(self.episode_rewards)
+        ax1.set_title('Episode Rewards')
+        ax1.set_xlabel('Episode')
+        ax1.set_ylabel('Reward')
+        ax2.plot(self.episode_lengths)
+        ax2.set_title('Episode Lengths')
+        ax2.set_xlabel('Episode')
+        ax2.set_ylabel('Length')
+        plt.tight_layout()
+        plt.savefig('training_stats.png')
+        plt.close(fig)
+        print(f"Average episode reward: {np.mean(self.episode_rewards)}")
+        print(f"Average episode length: {np.mean(self.episode_lengths)}")
+
+class AutoSaveCallback(BaseCallback): #to autosave the model every n_batch steps, and also update the total steps
+    def __init__(self, save_freq, save_path, steps_path, verbose=1):
+        super(AutoSaveCallback, self).__init__(verbose)
+        self.save_freq = save_freq
+        self.save_path = save_path
+        self.steps_path = steps_path
+        self.total_steps = 0
+        self.steps_since_last_save = 0
+
+    def _init_callback(self) -> None:
+        if os.path.exists(self.steps_path):
+            with open(self.steps_path, 'r') as f:
+                self.total_steps = int(f.read())
+        print(f"Starting training from step {self.total_steps}")
+
+    def _on_step(self) -> bool:
+        self.steps_since_last_save += 1
+        if self.n_calls % self.save_freq == 0:
+            self.total_steps += self.steps_since_last_save
+            self.model.save(self.save_path)
+            with open(self.steps_path, 'w') as f:
+                f.write(str(self.total_steps))
+            if self.verbose > 1:
+                print(f"Saved model to {self.save_path}")
+                print(f"Total steps: {self.total_steps}")
+            self.steps_since_last_save = 0
+        return True
+
+    def on_training_end(self) -> None:
+        # Save one last time at the end of training
+        self.total_steps += self.steps_since_last_save
+        self.model.save(self.save_path)
+        with open(self.steps_path, 'w') as f:
+            f.write(str(self.total_steps))
+        print(f"Training ended. Final total steps: {self.total_steps}")
+
+def train_model(continue_training=False):
+    pyautogui.press('space')  # unpause the game
+    time.sleep(2)  # wait for game to start
+
+    env = make_vec_env(lambda: create_env(), n_envs=1)
+    env = VecNormalize(env, norm_obs=False, norm_reward=False)
+    model_path = "ppo_geometry_dash_model"
+    steps_path = "model_trained_steps.txt"
+
+    policy_kwargs = dict(features_extractor_class=CustomCNN, features_extractor_kwargs=dict(features_dim=256),)
+
+    n_batch = 1000
+
+    if continue_training and os.path.exists(model_path + ".zip"):
+        try:
+            print("Attempting to load existing model...")
+            model = PPO.load(model_path, env=env)
+            print("Existing model loaded successfully.")
+            #update n steps after loading
+            #model.n_steps = n_batch
+            #model.batch_size = n_batch
+            if os.path.exists(steps_path):
+                with open(steps_path, 'r') as f:
+                    total_trained_steps = int(f.read())
+                print(f"Loaded total trained steps: {total_trained_steps}")
+        except (EOFError, KeyError, zipfile.BadZipFile) as e:
+            print(f"Error loading model: {e}")
+            print("Creating new model instead.")
+            model = PPO('CnnPolicy', env, verbose=1, n_steps=n_batch, batch_size=n_batch,
+                        learning_rate=3e-4, gamma=0.99, ent_coef=0.01, clip_range=0.2,
+                        n_epochs=4, gae_lambda=0.95, policy_kwargs=policy_kwargs)
+    else:
+        print("Creating new model...")
+        model = PPO('CnnPolicy', env, verbose=1, n_steps=n_batch, batch_size=n_batch,
+                    learning_rate=3e-4, gamma=0.99, ent_coef=0.01, clip_range=0.2,
+                    n_epochs=4, gae_lambda=0.95, policy_kwargs=policy_kwargs)
+
+    eval_env = make_vec_env(lambda: create_env(), n_envs=1)
+    eval_env = VecNormalize(eval_env, norm_obs=False, norm_reward=False)
+
+    stop_train_callback = StopTrainingOnRewardThreshold(reward_threshold=500, verbose=1)
+    eval_callback = EvalCallback(eval_env,
+                                 callback_on_new_best=stop_train_callback,
+                                 eval_freq=10 * n_batch,
+                                 best_model_save_path='./best_model/',
+                                 verbose=1)
+
+    #input detector for pausing training
+    input_detector = InputDetector()
+    key_listener_thread = threading.Thread(target=input_detector.start_key_listener(), daemon=True)
+    key_listener_thread.start()
+    training_interrupt_callback = TrainingInterruptCallback(input_detector)
+
+    #for autosaving
+    auto_save_callback = AutoSaveCallback(save_freq=n_batch, save_path=model_path, steps_path=steps_path)
+    if continue_training and 'total_trained_steps' in locals():
+        auto_save_callback.total_steps = total_trained_steps
+
+    total_timesteps = 100000  # Increased for longer training
+
+    try:
+        model.learn(total_timesteps=total_timesteps, callback=[eval_callback, training_interrupt_callback, auto_save_callback])
+    except Exception as e:
+        print(f"An error occurred during training: {e}")
+    finally:
+        auto_save_callback.on_training_end() #ensure final save
+        print(f"Model saved successfully to {model_path}")
+        print(f"Total trained steps: {auto_save_callback.total_steps}")
+        env.close()
+        eval_env.close()
+
+    return model
+
+def model_trained_steps():
+    steps_path = "model_trained_steps.txt"
+    if os.path.exists(steps_path):
+        with open(steps_path, 'r') as f:
+            return int(f.read())
+    else:
+        return 0
+
+def run_trained_model():
+    base_env = GeometryDashEnv() #create environment
+    base_env.focus_geometry_dash_window()
+    env = make_vec_env(lambda: base_env, n_envs=1) #wrap env
+    model = PPO.load("ppo_geometry_dash_model") #load model
+
+    done = False
+    step_count = 0
+    pyautogui.press('space')  # unpause the game
+    time.sleep(2) #wait for game to start
+    obs = env.reset() #reset env
+
+    #test model
+    for episode in range(5): #run for n episodes
+        done = False
+        step_count = 0 #reset step count at start of each episode
+        while not done and base_env.if_level_finished(step_count) == False:
+            action, _states = model.predict(obs) #model predicts actions
+            obs, reward, done, info = env.step(action) #perform actions in env
+            step_count += 1 #increment each step
+            #env.render()
+            if done:
+                print(f"Episode {episode + 1} finished after {step_count} steps.")
+                obs = env.reset() #reset env if game ends
+                done = False #reset done flag for next ep
+
+    env.close()
+    cv2.destroyAllWindows()  # close render
+    pyautogui.press('esc')  # pause after tests end
+    time.sleep(1)
+    pyautogui.press('esc')  # exit to menu/level select
+
+def profile_env():
+    env = GeometryDashEnv()
+    env.reset()
+
+    cProfile.runctx('for _ in range(50): env.step(env.action_space.sample())', globals(), locals(), 'profile_stats')
+
+    stats = pstats.Stats('profile_stats')
+    stats.sort_stats('cumulative').print_stats(20)
+
+# Uncomment this line to train the model (run it once)
+#train_model(True)
+
+# Uncomment this line to run the trained model
+#run_trained_model()
+#print(f"Total steps trained: {model_trained_steps()}")
+
+# Uncomment this line to test the environment
+test_environment()
+
+# Uncomment this line to train the neural network for death detection (run once)
+#train_death_detection_nn('C:\\Users\\sigle\\PycharmProjects\\GeometryDash-AI\\') #current Loss: 0.1846
+
+# Uncomment these lines to evaluate the death detection model neural network
+#model = DeathDetectionNN()
+#model.load_state_dict((th.load("death_detection_model.pth")))
+#evaluate_death_detection_model(model, 'C:\\Users\\sigle\\PycharmProjects\\GeometryDash-AI\\test_data') #it got 77.27%
+
+# Uncomment to test the profile to identify which parts of the code take the most time
+#profile_env()
+
